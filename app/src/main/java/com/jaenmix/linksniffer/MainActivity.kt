@@ -67,9 +67,8 @@ class MainActivity : AppCompatActivity() {
                     packetCount = intent.getLongExtra("count", packetCount)
                     updateStatus()
                 }
-                CaptureListenerService.ACTION_CAPTURE_ERROR -> {
+                CaptureListenerService.ACTION_CAPTURE_ERROR ->
                     statusText.text = "Error de captura: ${intent.getStringExtra("error") ?: "desconocido"}"
-                }
             }
         }
     }
@@ -106,12 +105,7 @@ class MainActivity : AppCompatActivity() {
             statusText.text = "Estado: detenido | Paquetes recibidos: 0"
         }
         mediaOnly.setOnCheckedChangeListener { _, _ -> refresh() }
-        list.setOnItemClickListener { _, _, position, _ ->
-            val value = shown[position].removePrefix("host://").removePrefix("dns://").removePrefix("sni://")
-            getSystemService(ClipboardManager::class.java)
-                .setPrimaryClip(ClipData.newPlainText("Link Sniffer", value))
-            Toast.makeText(this, "Copiado", Toast.LENGTH_SHORT).show()
-        }
+        list.setOnItemClickListener { _, _, position, _ -> copyResult(shown[position]) }
         requestNotificationPermission()
         refresh()
     }
@@ -133,6 +127,15 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateStatus() {
         statusText.text = "Estado: capturando ${selectedPackage ?: ""} | Paquetes: $packetCount"
+    }
+
+    private fun copyResult(display: String) {
+        if (display.startsWith("══") || display.startsWith("Sin ")) return
+        val value = display.substringBefore("  ×").substringBefore(" — ")
+            .removePrefix("host://").removePrefix("dns://").removePrefix("sni://")
+        getSystemService(ClipboardManager::class.java)
+            .setPrimaryClip(ClipData.newPlainText("Link Sniffer", value))
+        Toast.makeText(this, "Copiado", Toast.LENGTH_SHORT).show()
     }
 
     private fun loadLaunchableApps() {
@@ -202,10 +205,73 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refresh() {
-        val media = Regex("(?i)(\\.m3u8(?:[?&#]|$)|\\.mpd(?:[?&#]|$)|\\.m4s(?:[?&#]|$)|\\.ts(?:[?&#]|$))")
+        val entries = CaptureStore.readCounts(this)
+        val mediaRegex = Regex("(?i)(\\.m3u8(?:[?&#]|$)|\\.mpd(?:[?&#]|$)|\\.m4s(?:[?&#]|$)|\\.ts(?:[?&#]|$))")
+        val media = entries.filter { mediaRegex.containsMatchIn(it.first) }
+
         shown.clear()
-        shown.addAll(CaptureStore.read(this).filter { value -> !mediaOnly.isChecked || media.containsMatchIn(value) })
+        shown += "══ ENLACES MULTIMEDIA DETECTADOS ══"
+        if (media.isEmpty()) shown += "Sin enlaces multimedia visibles"
+        else shown += media.map { (value, count) -> "$value  ×$count" }
+
+        if (!mediaOnly.isChecked) {
+            val serverCounts = linkedMapOf<String, Int>()
+            entries.filter { it.first.startsWith("sni://") || it.first.startsWith("dns://") || it.first.startsWith("host://") }
+                .forEach { (value, count) ->
+                    val host = value.substringAfter("://")
+                    val label = when {
+                        value.startsWith("sni://") -> "$host — HTTPS/SNI"
+                        value.startsWith("dns://") -> "$host — DNS"
+                        else -> "$host — HOST"
+                    }
+                    serverCounts[label] = (serverCounts[label] ?: 0) + count
+                }
+
+            shown += "══ SERVIDORES DETECTADOS ══"
+            if (serverCounts.isEmpty()) shown += "Sin servidores identificados"
+            else shown += serverCounts.entries.sortedByDescending { it.value }
+                .map { (label, count) -> "$label  ×$count" }
+
+            val flowCounts = linkedMapOf<String, Int>()
+            entries.filter { it.first.startsWith("flow://") }.forEach { (value, count) ->
+                val grouped = groupFlow(value)
+                flowCounts[grouped] = (flowCounts[grouped] ?: 0) + count
+            }
+
+            shown += "══ CONEXIONES AGRUPADAS ══"
+            if (flowCounts.isEmpty()) shown += "Sin conexiones de red"
+            else shown += flowCounts.entries.sortedByDescending { it.value }
+                .take(80)
+                .map { (label, count) -> "$label — $count eventos" }
+        }
         adapter.notifyDataSetChanged()
+    }
+
+    private fun groupFlow(value: String): String {
+        val match = Regex("^flow://(TCP|UDP) (.+):(\\d+) -> (.+):(\\d+)$").find(value)
+            ?: return value
+        val proto = match.groupValues[1]
+        val aHost = match.groupValues[2]
+        val aPort = match.groupValues[3].toIntOrNull() ?: 0
+        val bHost = match.groupValues[4]
+        val bPort = match.groupValues[5].toIntOrNull() ?: 0
+
+        val knownPorts = setOf(53, 80, 443, 853)
+        val (host, port) = when {
+            aPort in knownPorts && bPort !in knownPorts -> aHost to aPort
+            bPort in knownPorts && aPort !in knownPorts -> bHost to bPort
+            aPort in 1..32767 && bPort > 32767 -> aHost to aPort
+            bPort in 1..32767 && aPort > 32767 -> bHost to bPort
+            else -> if ("$aHost:$aPort" <= "$bHost:$bPort") aHost to aPort else bHost to bPort
+        }
+        val service = when (port) {
+            443 -> "HTTPS"
+            80 -> "HTTP"
+            53 -> "DNS"
+            853 -> "DNS-TLS"
+            else -> "puerto $port"
+        }
+        return "$host:$port — $proto/$service"
     }
 
     private fun isPcapdroidInstalled(): Boolean = try { packageManager.getPackageInfo("com.emanuelef.remote_capture", 0); true }
