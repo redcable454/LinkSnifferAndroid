@@ -57,7 +57,11 @@ class CaptureListenerService : Service() {
                 }
             } catch (e: Exception) {
                 if (e !is SocketException && running.get()) {
-                    sendBroadcast(Intent(ACTION_CAPTURE_ERROR).setPackage(packageName).putExtra("error", e.message ?: "Error UDP"))
+                    sendBroadcast(
+                        Intent(ACTION_CAPTURE_ERROR)
+                            .setPackage(packageName)
+                            .putExtra("error", e.message ?: "Error UDP")
+                    )
                 }
             } finally {
                 socket = null
@@ -91,8 +95,7 @@ class CaptureListenerService : Service() {
         val proto = u8(b, o + 9)
         val src = ipv4(b, o + 12)
         val dst = ipv4(b, o + 16)
-        val l4 = o + ihl
-        analyzeTransport(b, l4, end, proto, src, dst)
+        analyzeTransport(b, o + ihl, end, proto, src, dst)
     }
 
     private fun analyzeIpv6(b: ByteArray, o: Int, end: Int) {
@@ -114,6 +117,7 @@ class CaptureListenerService : Service() {
             6 -> {
                 if (l4 + 20 > end) return
                 val tcpHeader = ((u8(b, l4 + 12) ushr 4) and 0x0f) * 4
+                if (tcpHeader < 20) return
                 (l4 + tcpHeader).coerceAtMost(end)
             }
             17 -> (l4 + 8).coerceAtMost(end)
@@ -126,6 +130,8 @@ class CaptureListenerService : Service() {
         if (proto == 6 && (srcPort == 443 || dstPort == 443)) {
             parseTlsSni(b, payloadOffset, end)?.let { addItem("sni://$it") }
         }
+
+        if (payloadOffset < end) scanVisibleText(b, payloadOffset, end)
     }
 
     private fun parseDnsQuery(b: ByteArray, start: Int, end: Int): String? {
@@ -183,21 +189,58 @@ class CaptureListenerService : Service() {
     }
 
     private fun scanVisibleText(bytes: ByteArray, offset: Int, end: Int) {
+        if (offset >= end) return
         val text = buildString(end - offset) {
             for (i in offset until end) {
                 val v = u8(bytes, i)
                 append(if (v in 32..126) v.toChar() else ' ')
             }
         }
+
         URL_REGEX.findAll(text).forEach { m ->
-            val cleaned = m.value.trimEnd('.', ',', ';', ')', ']', '}', '\'', '"')
-            if (cleaned.length <= 2048) addItem(cleaned)
+            val cleaned = cleanUrl(m.value)
+            if (cleaned.length <= 4096) addItem(cleaned)
         }
+
+        val host = HTTP_HOST_REGEX.find(text)?.groupValues?.getOrNull(1)?.lowercase()
+        if (!host.isNullOrBlank()) addItem("httphost://$host")
+
+        HTTP_REQUEST_REGEX.findAll(text).forEach { match ->
+            val target = match.groupValues[2]
+            if (target.startsWith("http://", true) || target.startsWith("https://", true)) {
+                val cleaned = cleanUrl(target)
+                if (MEDIA_REGEX.containsMatchIn(cleaned)) addItem(cleaned)
+            } else if (host != null && target.startsWith("/") && MEDIA_REGEX.containsMatchIn(target)) {
+                addItem("http://$host${cleanUrl(target)}")
+            }
+        }
+
+        MEDIA_PATH_REGEX.findAll(text).forEach { match ->
+            val path = cleanUrl(match.value)
+            if (host != null && path.startsWith("/")) addItem("http://$host$path")
+            else addItem("path://$path")
+        }
+
         HOST_REGEX.findAll(text).forEach { m ->
-            val host = m.value.lowercase()
-            if (host.length <= 253 && !host.matches(Regex("^\\d+(\\.\\d+){3}$"))) addItem("host://$host")
+            val visibleHost = m.value.lowercase()
+            if (visibleHost.length <= 253 && !visibleHost.matches(Regex("^\\d+(\\.\\d+){3}$"))) {
+                addItem("host://$visibleHost")
+            }
+        }
+
+        if (text.contains("#EXTM3U", ignoreCase = true) ||
+            text.contains("application/vnd.apple.mpegurl", ignoreCase = true) ||
+            text.contains("application/x-mpegURL", ignoreCase = true)) {
+            addItem("hint://HLS-manifest-visible")
+        }
+        if (text.contains("application/dash+xml", ignoreCase = true) ||
+            text.contains("<MPD", ignoreCase = true)) {
+            addItem("hint://DASH-manifest-visible")
         }
     }
+
+    private fun cleanUrl(value: String): String =
+        value.trim().trimEnd('.', ',', ';', ')', ']', '}', '\'', '"', '>')
 
     private fun addItem(value: String) {
         CaptureStore.add(this, value)
@@ -237,7 +280,12 @@ class CaptureListenerService : Service() {
         private const val PCAP_RECORD_HEADER_SIZE = 16
         private const val CHANNEL_ID = "capture"
         private const val NOTIFICATION_ID = 7001
-        private val URL_REGEX = Regex("https?://[^\\s<>\\\"']+", setOf(RegexOption.IGNORE_CASE))
-        private val HOST_REGEX = Regex("(?i)(?<![A-Za-z0-9_-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+(?:com|net|org|tv|pe|io|app|cloud|live|stream|cdn|xyz|co|me)(?![A-Za-z0-9_-])")
+
+        private val URL_REGEX = Regex("https?://[^\\s<>\\\"']+", RegexOption.IGNORE_CASE)
+        private val MEDIA_REGEX = Regex("(?i)(\\.m3u8|\\.mpd|\\.m4s|\\.ts)(?:[?&#/]|$)")
+        private val MEDIA_PATH_REGEX = Regex("(?i)/(?:[^\\s<>\\\"']{0,1500}?)(?:\\.m3u8|\\.mpd|\\.m4s|\\.ts)(?:[?][^\\s<>\\\"']*)?")
+        private val HTTP_REQUEST_REGEX = Regex("(?i)(GET|POST|HEAD|OPTIONS)\\s+([^\\s]+)\\s+HTTP/1\\.[01]")
+        private val HTTP_HOST_REGEX = Regex("(?i)(?:^|\\s)Host:\\s*([a-z0-9.-]+)(?::\\d+)?")
+        private val HOST_REGEX = Regex("(?i)(?<![A-Za-z0-9_-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+(?:com|net|org|tv|pe|io|app|cloud|live|stream|cdn|xyz|co|me|lat)(?![A-Za-z0-9_-])")
     }
 }
