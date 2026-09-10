@@ -38,10 +38,12 @@ class MainActivity : AppCompatActivity() {
     private val shown = mutableListOf<String>()
     private val apps = mutableListOf<AppItem>()
     private var selectedPackage: String? = null
+    private var packetCount: Long = 0
 
     private val captureLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
-            statusText.text = "Estado: capturando ${selectedPackage ?: ""}"
+            packetCount = 0
+            updateStatus()
             Toast.makeText(this, "Captura iniciada. Abre y usa la app seleccionada.", Toast.LENGTH_LONG).show()
         } else {
             statusText.text = "Estado: captura no iniciada"
@@ -52,13 +54,24 @@ class MainActivity : AppCompatActivity() {
 
     private val stopLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         stopService(Intent(this, CaptureListenerService::class.java))
-        statusText.text = "Estado: detenido"
+        statusText.text = "Estado: detenido | Paquetes recibidos: $packetCount"
     }
 
     private val notificationPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     private val receiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) = refresh()
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                CaptureListenerService.ACTION_NEW_ITEM -> refresh()
+                CaptureListenerService.ACTION_PACKET_COUNT -> {
+                    packetCount = intent.getLongExtra("count", packetCount)
+                    updateStatus()
+                }
+                CaptureListenerService.ACTION_CAPTURE_ERROR -> {
+                    statusText.text = "Error de captura: ${intent.getStringExtra("error") ?: "desconocido"}"
+                }
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -89,7 +102,9 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.stopButton).setOnClickListener { stopCapture() }
         findViewById<Button>(R.id.clearButton).setOnClickListener {
             CaptureStore.clear(this)
+            packetCount = 0
             refresh()
+            statusText.text = "Estado: detenido | Paquetes recibidos: 0"
         }
         mediaOnly.setOnCheckedChangeListener { _, _ -> refresh() }
         list.setOnItemClickListener { _, _, position, _ ->
@@ -104,12 +119,21 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
-        ContextCompat.registerReceiver(this, receiver, IntentFilter(CaptureListenerService.ACTION_NEW_ITEM), ContextCompat.RECEIVER_NOT_EXPORTED)
+        val filter = IntentFilter().apply {
+            addAction(CaptureListenerService.ACTION_NEW_ITEM)
+            addAction(CaptureListenerService.ACTION_PACKET_COUNT)
+            addAction(CaptureListenerService.ACTION_CAPTURE_ERROR)
+        }
+        ContextCompat.registerReceiver(this, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
     }
 
     override fun onStop() {
         runCatching { unregisterReceiver(receiver) }
         super.onStop()
+    }
+
+    private fun updateStatus() {
+        statusText.text = "Estado: capturando ${selectedPackage ?: ""} | Paquetes: $packetCount"
     }
 
     private fun loadLaunchableApps() {
@@ -161,6 +185,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         CaptureStore.clear(this)
+        packetCount = 0
         refresh()
         ContextCompat.startForegroundService(this, Intent(this, CaptureListenerService::class.java))
 
@@ -168,8 +193,10 @@ class MainActivity : AppCompatActivity() {
             setClassName("com.emanuelef.remote_capture", "com.emanuelef.remote_capture.activities.CaptureCtrl")
             putExtra("action", "start")
             putExtra("pcap_dump_mode", "udp_exporter")
+            // Compatibilidad con versiones antiguas y actuales de PCAPdroid.
+            putExtra("collector_ip_address", "127.0.0.1")
             putExtra("collector_host", "127.0.0.1")
-            putExtra("collector_port", CaptureListenerService.PORT)
+            putExtra("collector_port", CaptureListenerService.PORT.toString())
             putExtra("app_filter", targetPackage)
             putExtra("full_payload", true)
             putExtra("snaplen", 65535)
@@ -187,11 +214,11 @@ class MainActivity : AppCompatActivity() {
             runCatching { stopLauncher.launch(intent) }
                 .onFailure {
                     stopService(Intent(this, CaptureListenerService::class.java))
-                    statusText.text = "Estado: detenido"
+                    statusText.text = "Estado: detenido | Paquetes recibidos: $packetCount"
                 }
         } else {
             stopService(Intent(this, CaptureListenerService::class.java))
-            statusText.text = "Estado: detenido"
+            statusText.text = "Estado: detenido | Paquetes recibidos: $packetCount"
         }
     }
 
