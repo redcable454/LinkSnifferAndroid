@@ -9,13 +9,15 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import java.net.DatagramPacket
 import java.net.DatagramSocket
-import java.net.InetAddress
+import java.net.SocketException
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 class CaptureListenerService : Service() {
     private var socket: DatagramSocket? = null
     private var worker: Thread? = null
     private val running = AtomicBoolean(false)
+    private val packetCount = AtomicLong(0)
 
     override fun onCreate() {
         super.onCreate()
@@ -24,7 +26,7 @@ class CaptureListenerService : Service() {
             NOTIFICATION_ID,
             NotificationCompat.Builder(this, CHANNEL_ID)
                 .setContentTitle("Link Sniffer")
-                .setContentText("Escuchando tráfico local de PCAPdroid")
+                .setContentText("Escuchando paquetes de PCAPdroid")
                 .setSmallIcon(android.R.drawable.stat_sys_download_done)
                 .setOngoing(true)
                 .build()
@@ -36,16 +38,29 @@ class CaptureListenerService : Service() {
         if (!running.compareAndSet(false, true)) return
         worker = Thread {
             try {
-                DatagramSocket(PORT, InetAddress.getByName("127.0.0.1")).use { s ->
+                // Igual que PCAPReceiver oficial: escuchar el puerto en todas las interfaces.
+                DatagramSocket(PORT).use { s ->
                     socket = s
                     val buf = ByteArray(65535)
                     while (running.get()) {
                         val packet = DatagramPacket(buf, buf.size)
                         s.receive(packet)
-                        analyze(packet.data, packet.length)
+                        val len = packet.length
+                        val count = packetCount.incrementAndGet()
+                        broadcastPacketCount(count)
+
+                        // PCAPdroid UDP exporter envía primero cabecera PCAP de 24 bytes.
+                        if (isPcapHeader(buf, len)) continue
+                        if (len <= PCAP_RECORD_HEADER_SIZE) continue
+
+                        // Cada datagrama posterior empieza con pcaprec_hdr_s (16 bytes).
+                        analyze(buf, PCAP_RECORD_HEADER_SIZE, len - PCAP_RECORD_HEADER_SIZE)
                     }
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                if (e !is SocketException && running.get()) {
+                    sendBroadcast(Intent(ACTION_CAPTURE_ERROR).setPackage(packageName).putExtra("error", e.message ?: "Error UDP"))
+                }
             } finally {
                 socket = null
                 running.set(false)
@@ -53,9 +68,21 @@ class CaptureListenerService : Service() {
         }.apply { name = "LinkSnifferUdp"; start() }
     }
 
-    private fun analyze(bytes: ByteArray, len: Int) {
-        val text = buildString(len) {
-            for (i in 0 until len) {
+    private fun isPcapHeader(bytes: ByteArray, len: Int): Boolean {
+        if (len != 24 || len < 4) return false
+        val b0 = bytes[0].toInt() and 0xff
+        val b1 = bytes[1].toInt() and 0xff
+        val b2 = bytes[2].toInt() and 0xff
+        val b3 = bytes[3].toInt() and 0xff
+        return (b0 == 0xd4 && b1 == 0xc3 && b2 == 0xb2 && b3 == 0xa1) ||
+            (b0 == 0xa1 && b1 == 0xb2 && b2 == 0xc3 && b3 == 0xd4)
+    }
+
+    private fun analyze(bytes: ByteArray, offset: Int, len: Int) {
+        if (len <= 0) return
+        val end = (offset + len).coerceAtMost(bytes.size)
+        val text = buildString(end - offset) {
+            for (i in offset until end) {
                 val v = bytes[i].toInt() and 0xff
                 append(if (v in 32..126) v.toChar() else ' ')
             }
@@ -79,6 +106,10 @@ class CaptureListenerService : Service() {
         }
     }
 
+    private fun broadcastPacketCount(count: Long) {
+        sendBroadcast(Intent(ACTION_PACKET_COUNT).setPackage(packageName).putExtra("count", count))
+    }
+
     override fun onDestroy() {
         running.set(false)
         socket?.close()
@@ -100,6 +131,9 @@ class CaptureListenerService : Service() {
     companion object {
         const val PORT = 5123
         const val ACTION_NEW_ITEM = "com.jaenmix.linksniffer.NEW_ITEM"
+        const val ACTION_PACKET_COUNT = "com.jaenmix.linksniffer.PACKET_COUNT"
+        const val ACTION_CAPTURE_ERROR = "com.jaenmix.linksniffer.CAPTURE_ERROR"
+        private const val PCAP_RECORD_HEADER_SIZE = 16
         private const val CHANNEL_ID = "capture"
         private const val NOTIFICATION_ID = 7001
 
