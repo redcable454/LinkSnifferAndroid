@@ -44,7 +44,7 @@ class MainActivity : AppCompatActivity() {
         if (result.resultCode == Activity.RESULT_OK) {
             packetCount = 0
             updateStatus()
-            Toast.makeText(this, "Captura iniciada. Abre y usa la app seleccionada.", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Captura iniciada. Reproduce el contenido dentro de la app seleccionada.", Toast.LENGTH_LONG).show()
         } else {
             statusText.text = "Estado: captura no iniciada"
             stopService(Intent(this, CaptureListenerService::class.java))
@@ -130,9 +130,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun copyResult(display: String) {
-        if (display.startsWith("══") || display.startsWith("Sin ")) return
+        if (display.startsWith("══") || display.startsWith("Sin ") || display.startsWith("Captura ")) return
         val value = display.substringBefore("  ×").substringBefore(" — ")
             .removePrefix("host://").removePrefix("dns://").removePrefix("sni://")
+            .removePrefix("httphost://").removePrefix("path://")
         getSystemService(ClipboardManager::class.java)
             .setPrimaryClip(ClipData.newPlainText("Link Sniffer", value))
         Toast.makeText(this, "Copiado", Toast.LENGTH_SHORT).show()
@@ -206,57 +207,88 @@ class MainActivity : AppCompatActivity() {
 
     private fun refresh() {
         val entries = CaptureStore.readCounts(this)
-        val mediaRegex = Regex("(?i)(\\.m3u8(?:[?&#]|$)|\\.mpd(?:[?&#]|$)|\\.m4s(?:[?&#]|$)|\\.ts(?:[?&#]|$))")
+        val mediaRegex = Regex("(?i)(\\.m3u8(?:[?&#/]|$)|\\.mpd(?:[?&#/]|$)|\\.m4s(?:[?&#/]|$)|\\.ts(?:[?&#/]|$))")
         val media = entries.filter { mediaRegex.containsMatchIn(it.first) }
+        val hints = entries.filter { it.first.startsWith("hint://") }
 
         shown.clear()
         shown += "══ ENLACES MULTIMEDIA DETECTADOS ══"
         if (media.isEmpty()) shown += "Sin enlaces multimedia visibles"
-        else shown += media.map { (value, count) -> "$value  ×$count" }
+        else shown += media.sortedByDescending { it.second }.map { (value, count) -> "$value  ×$count" }
+
+        if (hints.isNotEmpty()) {
+            shown += "══ INDICIOS DE STREAMING ══"
+            shown += hints.map { (value, count) -> "${value.removePrefix("hint://")}  ×$count" }
+        }
 
         if (!mediaOnly.isChecked) {
             val serverCounts = linkedMapOf<String, Int>()
-            entries.filter { it.first.startsWith("sni://") || it.first.startsWith("dns://") || it.first.startsWith("host://") }
-                .forEach { (value, count) ->
-                    val host = value.substringAfter("://")
+            entries.filter {
+                it.first.startsWith("sni://") || it.first.startsWith("dns://") ||
+                    it.first.startsWith("host://") || it.first.startsWith("httphost://")
+            }.forEach { (value, count) ->
+                val host = value.substringAfter("://").lowercase()
+                if (!isAuxiliaryHost(host)) {
                     val label = when {
                         value.startsWith("sni://") -> "$host — HTTPS/SNI"
+                        value.startsWith("httphost://") -> "$host — HTTP/HOST"
                         value.startsWith("dns://") -> "$host — DNS"
                         else -> "$host — HOST"
                     }
                     serverCounts[label] = (serverCounts[label] ?: 0) + count
                 }
+            }
 
-            shown += "══ SERVIDORES DETECTADOS ══"
+            shown += "══ POSIBLES SERVIDORES MULTIMEDIA ══"
+            val likely = serverCounts.entries
+                .filter { isLikelyMediaServer(it.key.substringBefore(" — ")) }
+                .sortedByDescending { it.value }
+            if (likely.isEmpty()) shown += "Sin servidor multimedia identificable todavía"
+            else shown += likely.take(20).map { (label, count) -> "$label  ×$count" }
+
+            shown += "══ SERVIDORES RELEVANTES ══"
             if (serverCounts.isEmpty()) shown += "Sin servidores identificados"
             else shown += serverCounts.entries.sortedByDescending { it.value }
-                .map { (label, count) -> "$label  ×$count" }
+                .take(40).map { (label, count) -> "$label  ×$count" }
 
             val flowCounts = linkedMapOf<String, Int>()
             entries.filter { it.first.startsWith("flow://") }.forEach { (value, count) ->
                 val grouped = groupFlow(value)
-                flowCounts[grouped] = (flowCounts[grouped] ?: 0) + count
+                if (grouped != null) flowCounts[grouped] = (flowCounts[grouped] ?: 0) + count
             }
 
-            shown += "══ CONEXIONES AGRUPADAS ══"
-            if (flowCounts.isEmpty()) shown += "Sin conexiones de red"
+            shown += "══ CONEXIONES RELEVANTES ══"
+            if (flowCounts.isEmpty()) shown += "Sin conexiones relevantes"
             else shown += flowCounts.entries.sortedByDescending { it.value }
-                .take(80)
+                .take(40)
                 .map { (label, count) -> "$label — $count eventos" }
         }
         adapter.notifyDataSetChanged()
     }
 
-    private fun groupFlow(value: String): String {
+    private fun isAuxiliaryHost(host: String): Boolean {
+        val h = host.lowercase()
+        return AUXILIARY_HOST_PARTS.any { h.contains(it) }
+    }
+
+    private fun isLikelyMediaServer(host: String): Boolean {
+        val h = host.lowercase()
+        return MEDIA_HOST_HINTS.any { h.contains(it) } ||
+            (!isAuxiliaryHost(h) && (h.contains("video") || h.contains("media") || h.contains("stream") || h.contains("cdn") || h.contains("play") || h.contains("movie")))
+    }
+
+    private fun groupFlow(value: String): String? {
         val match = Regex("^flow://(TCP|UDP) (.+):(\\d+) -> (.+):(\\d+)$").find(value)
-            ?: return value
+            ?: return null
         val proto = match.groupValues[1]
         val aHost = match.groupValues[2]
         val aPort = match.groupValues[3].toIntOrNull() ?: 0
         val bHost = match.groupValues[4]
         val bPort = match.groupValues[5].toIntOrNull() ?: 0
 
-        val knownPorts = setOf(53, 80, 443, 853)
+        if (aPort == 53 || bPort == 53 || aPort == 853 || bPort == 853) return null
+
+        val knownPorts = setOf(80, 443, 8080, 8443)
         val (host, port) = when {
             aPort in knownPorts && bPort !in knownPorts -> aHost to aPort
             bPort in knownPorts && aPort !in knownPorts -> bHost to bPort
@@ -265,10 +297,8 @@ class MainActivity : AppCompatActivity() {
             else -> if ("$aHost:$aPort" <= "$bHost:$bPort") aHost to aPort else bHost to bPort
         }
         val service = when (port) {
-            443 -> "HTTPS"
-            80 -> "HTTP"
-            53 -> "DNS"
-            853 -> "DNS-TLS"
+            443, 8443 -> "HTTPS"
+            80, 8080 -> "HTTP"
             else -> "puerto $port"
         }
         return "$host:$port — $proto/$service"
@@ -280,5 +310,16 @@ class MainActivity : AppCompatActivity() {
     private fun requestNotificationPermission() {
         if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+
+    companion object {
+        private val AUXILIARY_HOST_PARTS = listOf(
+            "facebook.com", "googleapis.com", "google.com", "gstatic.com", "firebase", "crashlytics",
+            "doubleclick", "app-measurement", "googlesyndication", "google-analytics", "cloudflare-dns"
+        )
+        private val MEDIA_HOST_HINTS = listOf(
+            "m3u8", "dash", "hls", "manifest", "vod", "edge", "akamai", "fastly", "bunny", "cloudfront",
+            "jwplayer", "player", "stream", "video", "media", "cdn"
+        )
     }
 }
