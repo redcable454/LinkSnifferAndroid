@@ -16,20 +16,27 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="6dp"
-        android:text="Detecta URLs HTTP visibles y posibles dominios/SNI. HTTPS cifrado no se fuerza ni se rompe."
+        android:text="Selecciona una app y captura su tráfico visible. HTTPS cifrado no se fuerza ni se rompe."
         android:textSize="14sp" />
 
-    <EditText
-        android:id="@+id/packageInput"
+    <Spinner
+        android:id="@+id/appSpinner"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="14dp"
-        android:hint="Paquete de la app, ej. com.ejemplo.app"
-        android:inputType="textNoSuggestions" />
+        android:layout_marginTop="14dp" />
+
+    <TextView
+        android:id="@+id/selectedPackageText"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:text="Paquete: ninguno"
+        android:textSize="12sp" />
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
         android:orientation="horizontal">
 
         <Button
@@ -60,7 +67,7 @@
         android:id="@+id/mediaOnly"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="Mostrar solo enlaces de streaming (.m3u8, .mpd, .m4s, .ts)" />
+        android:text="Mostrar solo streaming (.m3u8, .mpd, .m4s, .ts)" />
 
     <TextView
         android:layout_width="match_parent"
