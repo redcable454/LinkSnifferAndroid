@@ -77,7 +77,6 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
-
         appSpinner = findViewById(R.id.appSpinner)
         selectedPackageText = findViewById(R.id.selectedPackageText)
         statusText = findViewById(R.id.statusText)
@@ -108,9 +107,9 @@ class MainActivity : AppCompatActivity() {
         }
         mediaOnly.setOnCheckedChangeListener { _, _ -> refresh() }
         list.setOnItemClickListener { _, _, position, _ ->
-            val value = shown[position].removePrefix("host://")
-            val cb = getSystemService(ClipboardManager::class.java)
-            cb.setPrimaryClip(ClipData.newPlainText("Link Sniffer", value))
+            val value = shown[position].removePrefix("host://").removePrefix("dns://").removePrefix("sni://")
+            getSystemService(ClipboardManager::class.java)
+                .setPrimaryClip(ClipData.newPlainText("Link Sniffer", value))
             Toast.makeText(this, "Copiado", Toast.LENGTH_SHORT).show()
         }
         requestNotificationPermission()
@@ -141,25 +140,14 @@ class MainActivity : AppCompatActivity() {
         val resolved = if (Build.VERSION.SDK_INT >= 33) {
             packageManager.queryIntentActivities(intent, PackageManager.ResolveInfoFlags.of(0L))
         } else {
-            @Suppress("DEPRECATION")
-            packageManager.queryIntentActivities(intent, 0)
+            @Suppress("DEPRECATION") packageManager.queryIntentActivities(intent, 0)
         }
-
         apps.clear()
-        apps.addAll(
-            resolved
-                .map { info ->
-                    AppItem(
-                        info.loadLabel(packageManager)?.toString()?.ifBlank { info.activityInfo.packageName }
-                            ?: info.activityInfo.packageName,
-                        info.activityInfo.packageName
-                    )
-                }
-                .filter { it.packageName != packageName && it.packageName != "com.emanuelef.remote_capture" }
-                .distinctBy { it.packageName }
-                .sortedBy { it.label.lowercase() }
-        )
-
+        apps.addAll(resolved.map { info ->
+            AppItem(info.loadLabel(packageManager)?.toString()?.ifBlank { info.activityInfo.packageName }
+                ?: info.activityInfo.packageName, info.activityInfo.packageName)
+        }.filter { it.packageName != packageName && it.packageName != "com.emanuelef.remote_capture" }
+            .distinctBy { it.packageName }.sortedBy { it.label.lowercase() })
         appSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, apps)
         if (apps.isNotEmpty()) {
             selectedPackage = apps.first().packageName
@@ -170,33 +158,25 @@ class MainActivity : AppCompatActivity() {
     private fun startCapture() {
         val targetPackage = selectedPackage
         if (targetPackage.isNullOrBlank()) {
-            Toast.makeText(this, "Selecciona una app primero.", Toast.LENGTH_LONG).show()
-            return
+            Toast.makeText(this, "Selecciona una app primero.", Toast.LENGTH_LONG).show(); return
         }
-
         if (!isPcapdroidInstalled()) {
             Toast.makeText(this, "Instala PCAPdroid primero.", Toast.LENGTH_LONG).show()
-            try {
-                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=com.emanuelef.remote_capture")))
-            } catch (_: Exception) {
-                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/apps/details?id=com.emanuelef.remote_capture")))
-            }
+            try { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=com.emanuelef.remote_capture"))) }
+            catch (_: Exception) { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/apps/details?id=com.emanuelef.remote_capture"))) }
             return
         }
 
-        CaptureStore.clear(this)
-        packetCount = 0
-        refresh()
+        CaptureStore.clear(this); packetCount = 0; refresh()
         ContextCompat.startForegroundService(this, Intent(this, CaptureListenerService::class.java))
 
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setClassName("com.emanuelef.remote_capture", "com.emanuelef.remote_capture.activities.CaptureCtrl")
             putExtra("action", "start")
             putExtra("pcap_dump_mode", "udp_exporter")
-            // Compatibilidad con versiones antiguas y actuales de PCAPdroid.
             putExtra("collector_ip_address", "127.0.0.1")
             putExtra("collector_host", "127.0.0.1")
-            putExtra("collector_port", CaptureListenerService.PORT.toString())
+            putExtra("collector_port", CaptureListenerService.PORT)
             putExtra("app_filter", targetPackage)
             putExtra("full_payload", true)
             putExtra("snaplen", 65535)
@@ -211,11 +191,10 @@ class MainActivity : AppCompatActivity() {
                 setClassName("com.emanuelef.remote_capture", "com.emanuelef.remote_capture.activities.CaptureCtrl")
                 putExtra("action", "stop")
             }
-            runCatching { stopLauncher.launch(intent) }
-                .onFailure {
-                    stopService(Intent(this, CaptureListenerService::class.java))
-                    statusText.text = "Estado: detenido | Paquetes recibidos: $packetCount"
-                }
+            runCatching { stopLauncher.launch(intent) }.onFailure {
+                stopService(Intent(this, CaptureListenerService::class.java))
+                statusText.text = "Estado: detenido | Paquetes recibidos: $packetCount"
+            }
         } else {
             stopService(Intent(this, CaptureListenerService::class.java))
             statusText.text = "Estado: detenido | Paquetes recibidos: $packetCount"
@@ -229,16 +208,11 @@ class MainActivity : AppCompatActivity() {
         adapter.notifyDataSetChanged()
     }
 
-    private fun isPcapdroidInstalled(): Boolean = try {
-        packageManager.getPackageInfo("com.emanuelef.remote_capture", 0)
-        true
-    } catch (_: PackageManager.NameNotFoundException) {
-        false
-    }
+    private fun isPcapdroidInstalled(): Boolean = try { packageManager.getPackageInfo("com.emanuelef.remote_capture", 0); true }
+    catch (_: PackageManager.NameNotFoundException) { false }
 
     private fun requestNotificationPermission() {
-        if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+        if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-        }
     }
 }
