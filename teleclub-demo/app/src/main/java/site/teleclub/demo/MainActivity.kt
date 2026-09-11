@@ -240,36 +240,34 @@ class MainActivity : Activity() {
             (function() {
               try {
                 var urls = [];
-                var v = document.querySelectorAll('video');
-                for (var i = 0; i < v.length; i++) {
-                  if (v[i].currentSrc) urls.push(v[i].currentSrc);
-                  if (v[i].src) urls.push(v[i].src);
+                var videos = document.querySelectorAll('video');
+                for (var i = 0; i < videos.length; i++) {
+                  if (videos[i].currentSrc) urls.push(videos[i].currentSrc);
+                  if (videos[i].src) urls.push(videos[i].src);
                 }
-                var s = document.querySelectorAll('video source, source[type*="video"], source[type*="mpegurl"], source[type*="dash"]');
-                for (var j = 0; j < s.length; j++) {
-                  if (s[j].src) urls.push(s[j].src);
+                var sources = document.querySelectorAll('video source, source[type*="video"], source[type*="mpegurl"], source[type*="dash"]');
+                for (var j = 0; j < sources.length; j++) {
+                  if (sources[j].src) urls.push(sources[j].src);
                 }
-                return JSON.stringify(urls);
+                for (var k = 0; k < urls.length; k++) {
+                  if (/\\.(m3u8|mpd|mp4)(\\?|$)/i.test(urls[k])) return urls[k];
+                }
+                return "";
               } catch (e) {
-                return "[]";
+                return "";
               }
             })();
         """.trimIndent()
 
         view.evaluateJavascript(js) { raw ->
-            if (delivered || raw.isNullOrBlank()) return@evaluateJavascript
-
-            val decoded = raw
-                .removePrefix(""")
-                .removeSuffix(""")
-                .replace("\\"", """)
-                .replace("\\/", "/")
-                .replace("\\\\", "\")
-
-            val regex = Regex("""https?://[^"\\]+?(?:\.m3u8|\.mpd|\.mp4)(?:\?[^"\\]*)?""", RegexOption.IGNORE_CASE)
-            val match = regex.find(decoded)?.value
-            if (match != null) {
-                deliverIfAllowed(match)
+            if (delivered || raw.isNullOrBlank() || raw == "null") return@evaluateJavascript
+            val candidate = try {
+                org.json.JSONTokener(raw).nextValue() as? String
+            } catch (_: Exception) {
+                null
+            }
+            if (!candidate.isNullOrBlank()) {
+                deliverIfAllowed(candidate)
             }
         }
     }
