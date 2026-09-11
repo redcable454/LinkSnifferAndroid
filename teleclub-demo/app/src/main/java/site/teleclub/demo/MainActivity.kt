@@ -209,8 +209,9 @@ class MainActivity : Activity() {
         webView.webChromeClient = WebChromeClient()
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                val host = request.url.host?.lowercase()
-                return host == null || host !in allowedHosts
+                // Deja que la página y sus redirecciones carguen normalmente.
+                // La entrega al reproductor nativo sigue limitada a allowedHosts.
+                return false
             }
 
             override fun onPageFinished(view: WebView, url: String) {
