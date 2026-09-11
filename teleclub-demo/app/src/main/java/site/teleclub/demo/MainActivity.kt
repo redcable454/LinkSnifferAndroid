@@ -127,11 +127,11 @@ class MainActivity : Activity() {
     }
 
     private fun mediaMime(url: String): String? {
-        val p = url.substringBefore('#').substringBefore('?').lowercase()
+        val p = url.lowercase()
         return when {
-            p.endsWith(".m3u8") -> MimeTypes.APPLICATION_M3U8
-            p.endsWith(".mpd") -> MimeTypes.APPLICATION_MPD
-            p.endsWith(".mp4") -> MimeTypes.VIDEO_MP4
+            Regex("""(^|[^a-z0-9])m3u8([^a-z0-9]|$)|\.m3u8(?:[?#&]|$)""").containsMatchIn(p) -> MimeTypes.APPLICATION_M3U8
+            Regex("""(^|[^a-z0-9])mpd([^a-z0-9]|$)|\.mpd(?:[?#&]|$)""").containsMatchIn(p) -> MimeTypes.APPLICATION_MPD
+            Regex("""\.mp4(?:[?#&]|$)""").containsMatchIn(p) -> MimeTypes.VIDEO_MP4
             else -> null
         }
     }
@@ -179,6 +179,67 @@ class MainActivity : Activity() {
         status.text = "Reproduciendo dentro de Teleclub con Media3 / ExoPlayer."
     }
 
+    inner class DetectorBridge {
+        @JavascriptInterface
+        fun report(url: String?) {
+            if (!url.isNullOrBlank()) deliverIfAllowed(url)
+        }
+    }
+
+    private fun installDetectorHooks(view: WebView) {
+        val js = """
+            (function() {
+              if (window.__teleclubDetectorInstalled) return;
+              window.__teleclubDetectorInstalled = true;
+
+              function report(u) {
+                try {
+                  if (u && typeof u === 'string' && window.TeleclubDetector) {
+                    window.TeleclubDetector.report(u);
+                  }
+                } catch(e) {}
+              }
+
+              try {
+                var oldFetch = window.fetch;
+                if (oldFetch) {
+                  window.fetch = function() {
+                    try {
+                      var x = arguments[0];
+                      if (typeof x === 'string') report(x);
+                      else if (x && x.url) report(x.url);
+                    } catch(e) {}
+                    return oldFetch.apply(this, arguments).then(function(r) {
+                      try { if (r && r.url) report(r.url); } catch(e) {}
+                      return r;
+                    });
+                  };
+                }
+              } catch(e) {}
+
+              try {
+                var oldOpen = XMLHttpRequest.prototype.open;
+                XMLHttpRequest.prototype.open = function(method, url) {
+                  try { report(String(url)); } catch(e) {}
+                  return oldOpen.apply(this, arguments);
+                };
+              } catch(e) {}
+
+              try {
+                var oldSetAttribute = Element.prototype.setAttribute;
+                Element.prototype.setAttribute = function(name, value) {
+                  try {
+                    if ((this.tagName === 'VIDEO' || this.tagName === 'SOURCE') &&
+                        String(name).toLowerCase() === 'src') report(String(value));
+                  } catch(e) {}
+                  return oldSetAttribute.apply(this, arguments);
+                };
+              } catch(e) {}
+            })();
+        """.trimIndent()
+        view.evaluateJavascript(js, null)
+    }
+
     @SuppressLint("SetJavaScriptEnabled")
     private fun openAuthorizedPage(pageUrl: String) {
         val pageHost = Uri.parse(pageUrl).host?.lowercase()
@@ -207,6 +268,8 @@ class MainActivity : Activity() {
         }
 
         webView.webChromeClient = WebChromeClient()
+        webView.removeJavascriptInterface("TeleclubDetector")
+        webView.addJavascriptInterface(DetectorBridge(), "TeleclubDetector")
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 // Deja que la página y sus redirecciones carguen normalmente.
@@ -214,8 +277,19 @@ class MainActivity : Activity() {
                 return false
             }
 
+            override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
+                super.onPageStarted(view, url, favicon)
+                installDetectorHooks(view)
+            }
+
+            override fun onLoadResource(view: WebView, url: String) {
+                super.onLoadResource(view, url)
+                if (!delivered) deliverIfAllowed(url)
+            }
+
             override fun onPageFinished(view: WebView, url: String) {
                 super.onPageFinished(view, url)
+                installDetectorHooks(view)
                 scanDomForVideo(view)
                 view.postDelayed({ if (!delivered) scanDomForVideo(view) }, 1200)
                 view.postDelayed({ if (!delivered) scanDomForVideo(view) }, 3000)
@@ -246,31 +320,32 @@ class MainActivity : Activity() {
                   if (videos[i].currentSrc) urls.push(videos[i].currentSrc);
                   if (videos[i].src) urls.push(videos[i].src);
                 }
-                var sources = document.querySelectorAll('video source, source[type*="video"], source[type*="mpegurl"], source[type*="dash"]');
+
+                var sources = document.querySelectorAll('video source, source');
                 for (var j = 0; j < sources.length; j++) {
                   if (sources[j].src) urls.push(sources[j].src);
                 }
-                for (var k = 0; k < urls.length; k++) {
-                  if (/\\.(m3u8|mpd|mp4)(\\?|$)/i.test(urls[k])) return urls[k];
+
+                try {
+                  var entries = performance.getEntriesByType('resource') || [];
+                  for (var k = 0; k < entries.length; k++) {
+                    if (entries[k] && entries[k].name) urls.push(entries[k].name);
+                  }
+                } catch(e) {}
+
+                for (var n = 0; n < urls.length; n++) {
+                  try {
+                    if (window.TeleclubDetector) window.TeleclubDetector.report(String(urls[n]));
+                  } catch(e) {}
                 }
-                return "";
+                return String(urls.length);
               } catch (e) {
-                return "";
+                return "0";
               }
             })();
         """.trimIndent()
 
-        view.evaluateJavascript(js) { raw ->
-            if (delivered || raw.isNullOrBlank() || raw == "null") return@evaluateJavascript
-            val candidate = try {
-                org.json.JSONTokener(raw).nextValue() as? String
-            } catch (_: Exception) {
-                null
-            }
-            if (!candidate.isNullOrBlank()) {
-                deliverIfAllowed(candidate)
-            }
-        }
+        view.evaluateJavascript(js, null)
     }
 
     private fun releasePlayer() {
