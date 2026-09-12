@@ -25,6 +25,51 @@ class MainActivity : Activity() {
     private var delivered = false
     private var allowedHosts: Set<String> = emptySet()
 
+    private val adHostFragments = listOf(
+        "doubleclick.net",
+        "googlesyndication.com",
+        "googleadservices.com",
+        "adservice.google.",
+        "adskeeper.",
+        "adsterra.",
+        "propellerads.",
+        "popads.",
+        "popcash.",
+        "exoclick.",
+        "trafficjunky.",
+        "juicyads.",
+        "clickadu.",
+        "hilltopads.",
+        "onclicka.",
+        "richads.",
+        "monetag.",
+        "pushground.",
+        "ad-maven.",
+        "admaven.",
+        "revcontent.",
+        "taboola.",
+        "outbrain."
+    )
+
+    private fun isAdUrl(url: String): Boolean {
+        val uri = runCatching { Uri.parse(url) }.getOrNull() ?: return false
+        val host = uri.host?.lowercase().orEmpty()
+        val full = url.lowercase()
+
+        if (adHostFragments.any { host.contains(it) }) return true
+
+        val suspiciousPath = listOf(
+            "/popunder", "/popup", "/interstitial", "/vast/", "/vpaid/",
+            "/ads/", "/adserver/", "/banner/", "adclick", "ad_redirect",
+            "trackingpixel", "clickunder"
+        )
+        return suspiciousPath.any { full.contains(it) }
+    }
+
+    private fun blockedResponse(): WebResourceResponse =
+        WebResourceResponse("text/plain", "utf-8", null)
+
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         buildUi()
@@ -322,15 +367,29 @@ class MainActivity : Activity() {
             mediaPlaybackRequiresUserGesture = false
             mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
             setSupportMultipleWindows(false)
+            javaScriptCanOpenWindowsAutomatically = false
         }
 
-        webView.webChromeClient = WebChromeClient()
+        webView.webChromeClient = object : WebChromeClient() {
+            override fun onCreateWindow(
+                view: WebView?,
+                isDialog: Boolean,
+                isUserGesture: Boolean,
+                resultMsg: android.os.Message?
+            ): Boolean {
+                status.text = "Popup bloqueado"
+                return false
+            }
+        }
         webView.removeJavascriptInterface("TeleclubDetector")
         webView.addJavascriptInterface(DetectorBridge(), "TeleclubDetector")
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                // Deja que la página y sus redirecciones carguen normalmente.
-                // La entrega al reproductor nativo sigue limitada a allowedHosts.
+                val u = request.url.toString()
+                if (isAdUrl(u)) {
+                    status.text = "Redirección publicitaria bloqueada"
+                    return true
+                }
                 return false
             }
 
@@ -356,14 +415,20 @@ class MainActivity : Activity() {
                 view: WebView?,
                 request: WebResourceRequest?
             ): WebResourceResponse? {
-                if (!delivered && request != null && request.method == "GET") {
-                    deliverIfAllowed(request.url.toString())
+                if (request != null && request.method == "GET") {
+                    val u = request.url.toString()
+                    if (isAdUrl(u)) {
+                        return blockedResponse()
+                    }
+                    if (!delivered) {
+                        deliverIfAllowed(u)
+                    }
                 }
                 return super.shouldInterceptRequest(view, request)
             }
         }
 
-        status.text = "Cargando página autorizada y buscando video..."
+        status.text = "Cargando página con bloqueador y buscando video..."
         webView.loadUrl(pageUrl)
     }
 
