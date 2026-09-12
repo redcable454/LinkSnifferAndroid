@@ -194,11 +194,60 @@ class MainActivity : Activity() {
 
               function report(u) {
                 try {
-                  if (u && typeof u === 'string' && window.TeleclubDetector) {
-                    window.TeleclubDetector.report(u);
+                  if (!u) return;
+                  var s = String(u);
+                  if (window.TeleclubDetector) window.TeleclubDetector.report(s);
+                } catch(e) {}
+              }
+
+              function reportVideo(video) {
+                try {
+                  report(video.currentSrc || video.src || "");
+                  var sources = video.querySelectorAll('source');
+                  for (var i = 0; i < sources.length; i++) {
+                    report(sources[i].src || sources[i].getAttribute('src') || "");
                   }
                 } catch(e) {}
               }
+
+              function bindVideo(video) {
+                try {
+                  if (!video || video.__teleclubBound) return;
+                  video.__teleclubBound = true;
+
+                  ['play','playing','loadedmetadata','canplay','click','touchend'].forEach(function(ev) {
+                    video.addEventListener(ev, function() { reportVideo(video); }, true);
+                  });
+
+                  reportVideo(video);
+
+                  try {
+                    new MutationObserver(function() { reportVideo(video); })
+                      .observe(video, {attributes:true, childList:true, subtree:true, attributeFilter:['src']});
+                  } catch(e) {}
+                } catch(e) {}
+              }
+
+              function scanVideos() {
+                try {
+                  var videos = document.querySelectorAll('video');
+                  for (var i = 0; i < videos.length; i++) bindVideo(videos[i]);
+                } catch(e) {}
+              }
+
+              document.addEventListener('play', function(e) {
+                try {
+                  var v = e.target && e.target.tagName === 'VIDEO' ? e.target : null;
+                  if (v) reportVideo(v);
+                } catch(e) {}
+              }, true);
+
+              document.addEventListener('click', function(e) {
+                try {
+                  var v = e.target && e.target.closest ? e.target.closest('video') : null;
+                  if (v) reportVideo(v);
+                } catch(e) {}
+              }, true);
 
               try {
                 var oldFetch = window.fetch;
@@ -206,11 +255,10 @@ class MainActivity : Activity() {
                   window.fetch = function() {
                     try {
                       var x = arguments[0];
-                      if (typeof x === 'string') report(x);
-                      else if (x && x.url) report(x.url);
+                      report(typeof x === 'string' ? x : (x && x.url ? x.url : ''));
                     } catch(e) {}
                     return oldFetch.apply(this, arguments).then(function(r) {
-                      try { if (r && r.url) report(r.url); } catch(e) {}
+                      try { report(r && r.url ? r.url : ''); } catch(e) {}
                       return r;
                     });
                   };
@@ -220,21 +268,30 @@ class MainActivity : Activity() {
               try {
                 var oldOpen = XMLHttpRequest.prototype.open;
                 XMLHttpRequest.prototype.open = function(method, url) {
-                  try { report(String(url)); } catch(e) {}
+                  try { report(url); } catch(e) {}
                   return oldOpen.apply(this, arguments);
                 };
               } catch(e) {}
 
               try {
-                var oldSetAttribute = Element.prototype.setAttribute;
-                Element.prototype.setAttribute = function(name, value) {
-                  try {
-                    if ((this.tagName === 'VIDEO' || this.tagName === 'SOURCE') &&
-                        String(name).toLowerCase() === 'src') report(String(value));
-                  } catch(e) {}
-                  return oldSetAttribute.apply(this, arguments);
-                };
+                new MutationObserver(function(mutations) {
+                  scanVideos();
+                  for (var i = 0; i < mutations.length; i++) {
+                    var nodes = mutations[i].addedNodes || [];
+                    for (var j = 0; j < nodes.length; j++) {
+                      var n = nodes[j];
+                      if (n && n.tagName === 'VIDEO') bindVideo(n);
+                      if (n && n.querySelectorAll) {
+                        var vs = n.querySelectorAll('video');
+                        for (var k = 0; k < vs.length; k++) bindVideo(vs[k]);
+                      }
+                    }
+                  }
+                }).observe(document.documentElement || document, {childList:true, subtree:true});
               } catch(e) {}
+
+              scanVideos();
+              setInterval(scanVideos, 1500);
             })();
         """.trimIndent()
         view.evaluateJavascript(js, null)
